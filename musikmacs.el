@@ -4,9 +4,14 @@
   (* dheight (- staff-y y)))
 (defmacro musikmacs--def-record (name fieldlist)
   (let ((prefix (concat "musikmacs--" (symbol-name name) "-"))
+        (typesym (intern (concat "musikmacs--" (symbol-name name))))
         (field-no 0))
     (cons 'progn
-          (mapcar (lambda (fieldname)
+          (cons `(defun ,typesym
+                     ,fieldlist
+                   ,(cons 'record (cons `(quote ,typesym) fieldlist))
+                   )
+                (mapcar (lambda (fieldname)
                     (setq field-no (+ field-no 1))
                     `(progn
                        (defun ,(intern (concat prefix (symbol-name fieldname)))
@@ -14,9 +19,10 @@
                             (aref rec ,field-no))
                        (defun ,(intern (concat prefix (symbol-name fieldname) "-set"))
                              (rec val)
-                            (aset rec ,field-no val)))) fieldlist))))
+                         (aset rec ,field-no val)))) fieldlist)))))
 (musikmacs--def-record staff (y clef key))
-(musikmacs--def-record note-group (x dot value ylist))
+(musikmacs--def-record note-group (x dot value list))
+(musikmacs--def-record note (y state text))
 
 (defun musikmacs--render-row (row-data
                               staff-list
@@ -99,17 +105,20 @@
           staff-list)))
 (defun musikmacs--render-group (note-group stem-up)
   (let ((notes-x (* horizontal-unit (musikmacs--note-group-x note-group)))
-        (notes-ylist (musikmacs--note-group-ylist note-group))
-        (min-y (car (musikmacs--note-group-ylist note-group)))
-        (max-y (car (last (musikmacs--note-group-ylist note-group))))
+        (notes-list (musikmacs--note-group-list note-group))
+        (min-y (musikmacs--note-y (car (musikmacs--note-group-list note-group))))
+        (max-y (musikmacs--note-y (car (last (musikmacs--note-group-list note-group)))))
         (last-y nil)
         (x-off (* dheight 1.115))
         (time-value (musikmacs--note-group-value note-group)))
-    (setq notes-x (if stem-up
+    (unless (null notes-list)
+      (setq notes-x (if stem-up
                       (+ notes-x x-off)
                     (- notes-x x-off)))
-    (mapc (lambda (y)
-            (let
+    (mapc (lambda (n)
+            (let ((y (musikmacs--note-y n))
+                  (state (musikmacs--note-state n)))
+                (let
                 ((reversing (if (and last-y (= y (+ last-y 1)))
                                 (progn
                                   (setq last-y nil)
@@ -117,24 +126,35 @@
                               (progn
                                 (setq last-y y)
                                 nil)))
-                 (note-yp (musikmacs--y-to-pixel y)))
-              (svg--append
-               svg
-               (dom-node 'use
-                         `((xlink:href . ,(if (equal reversing stem-up)
-                                              (format "#%s-body" time-value)
-                                            (format "#%s-body-left" time-value)))
-                           (x . ,notes-x)
-                           (y . ,note-yp)
-                           (fill . ,dcolor))))
+                 (note-yp (musikmacs--y-to-pixel y))
+                 (ncolor (cond ((eq state 'selected) (face-attribute font-lock-doc-face :foreground))
+                               ((eq state 'active) (face-attribute font-lock-builtin-face :foreground))
+                               (t dcolor)))
+                 (text (musikmacs--note-text n)))
+                (if text
+                    (svg-text svg
+                              text
+                              :x notes-x
+                              :y note-yp
+                              :stroke ncolor
+                              :font )
+                    (svg--append
+                     svg
+                     (dom-node 'use
+                               `((xlink:href . ,(if (equal reversing stem-up)
+                                                    (format "#%s-body" time-value)
+                                                  (format "#%s-body-left" time-value)))
+                                 (x . ,notes-x)
+                                 (y . ,note-yp)
+                                 (fill . ,ncolor)))))
               (when (and reversing (or (> y 5) (< y -5)))
                 (svg-line svg notes-x
                           note-yp
                           (if stem-up
                               (+ notes-x (* dheight 2.63))
                             (- notes-x (* dheight 2.63)))
-                          note-yp))))
-          notes-ylist)
+                          note-yp)))))
+          notes-list)
     (let ((start-x (if stem-up
                            (+ notes-x (* dheight 0.4))
                          (- notes-x (* dheight 0.4))))
@@ -171,23 +191,10 @@
                notes-x
                (musikmacs--y-to-pixel max-y)
                notes-x
-               (musikmacs--y-to-pixel min-y))))))
+               (musikmacs--y-to-pixel min-y)))))))
 (insert-image (musikmacs--render-row `((,(record 'musikmacs--note-group
-                                                 10 nil 'whole '(-7 -6 -5 -4))
+                                                 10 nil 'whole (list (musikmacs--note -7 nil nil) (musikmacs--note -4 nil nil)))
                                         ,(record 'musikmacs--note-group
-                                                 10 nil 'quarter '(0 2))
-                                        ,(record 'musikmacs--note-group
-                                                 10 nil 'whole '(-7 -6 -5 -4))
-                                        ,(record 'musikmacs--note-group
-                                                 10 nil 'quarter '(0 2)))
-                                       (,(record 'musikmacs--note-group
-                                                 20 nil 'quarter '(1 3))
-                                        ,(record 'musikmacs--note-group
-                                                 20 nil 'quarter '(-4 -2))
-                                        ,(record 'musikmacs--note-group
-                                                 20 nil 'quarter '(1 3))
-                                        ,(record 'musikmacs--note-group
-                                                 20 nil 'quarter '(-4 -2)))
+                                                 10 nil 'quarter (list (musikmacs--note 0 'active nil) (musikmacs--note 3 nil nil) (musikmacs--note 7 'active "x"))))
                                        )
-                                     `(,(record 'staff 10 nil nil)
-                                       ,(record 'staff 30 nil nil)) 50))
+                                     `(,(record 'staff 10 nil nil)) 20))
