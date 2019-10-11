@@ -21,15 +21,18 @@
                              (rec val)
                          (aset rec ,field-no val)))) fieldlist)))))
 (musikmacs--def-record staff (y clef key))
-(musikmacs--def-record note-group (x dot value list))
+(musikmacs--def-record note-group (dot value list))
 (musikmacs--def-record note (y state text))
+(musikmacs--def-record col (x staff-cells addons))
+(musikmacs--def-record staff-cell (note-group-up note-group-down addons))
 
-(defun musikmacs--render-row (row-data
-                              staff-list
+(defun musikmacs--render-row (object
+                              start
+                              end
+                              horizontal-unit
+                              cursor-pos
                               lower-y)
-  (let ((wwidth (window-body-width nil t))
-        (dheight (/ (face-attribute 'default :height) 20.0))
-        (dcolor (face-attribute 'default :foreground)))
+  (let ((dcolor (face-attribute 'default :foreground)))
         (let ((svg (svg-create wwidth
                                (* dheight lower-y)
                                :stroke-color dcolor
@@ -86,115 +89,246 @@
                                             `((xlink:href . "#quarter-body")
                                               (x . ,(* dheight -2.23))
                                               (y . 0)))))
-          (dolist (staff staff-list)
+          (dolist (staff (get-text-property start :musikmacs--staves object))
             (let ((staff-y (musikmacs--staff-y staff)))
               (dotimes (i 5)
                       (let ((y (musikmacs--y-to-pixel (* 2 (- i 2)))))
                         (svg-line svg 0 y
                                   wwidth y)))))
-          (let ((horizontal-unit 10))
-            (mapc 'musikmacs--render-col row-data))
+          (dotimes (i (- end start))
+            (musikmacs--render-col
+             (get-text-property (+ start i) :musikmacs--col object)
+             (get-text-property (+ start i) :musikmacs--staves object)
+             (equal i cursor-pos)))
           (svg-image svg))))
-(defun musikmacs--render-col (col-data)
-  (let ((current-group-cell col-data))
+(defun musikmacs--render-col (col-data
+                              staff-list
+                              selected)
+  (let* ((staff-cells (musikmacs--col-staff-cells col-data))
+         (notes-x (* horizontal-unit (musikmacs--col-x col-data)))
+         (addons (musikmacs--col-addons col-data)))
     (mapc (lambda (staff)
-            (let ((staff-y (musikmacs--staff-y staff)))
-              (musikmacs--render-group (car current-group-cell) t)
-              (musikmacs--render-group (cadr current-group-cell) nil)
-              (setq current-group-cell (cddr current-group-cell))))
-          staff-list)))
-(defun musikmacs--render-group (note-group stem-up)
-  (let ((notes-x (* horizontal-unit (musikmacs--note-group-x note-group)))
-        (notes-list (musikmacs--note-group-list note-group))
-        (min-y (musikmacs--note-y (car (musikmacs--note-group-list note-group))))
-        (max-y (musikmacs--note-y (car (last (musikmacs--note-group-list note-group)))))
-        (last-y nil)
-        (x-off (* dheight 1.115))
-        (time-value (musikmacs--note-group-value note-group)))
+            (let ((staff-y (musikmacs--staff-y staff))
+                  (staff-cell (car staff-cells)))
+              (musikmacs--render-group (musikmacs--staff-cell-note-group-up staff-cell) t selected)
+              (musikmacs--render-group (musikmacs--staff-cell-note-group-down staff-cell) nil selected)
+              (setq staff-cells (cdr staff-cells))))
+          staff-list)
+    (mapc (lambda (addon)
+            (cond ((eq 'barline addon)
+                   (svg-line svg
+                             notes-x
+                             (let ((staff-y (musikmacs--staff-y (car staff-list))))
+                               (musikmacs--y-to-pixel 4))
+                             notes-x
+                             (let ((staff-y (musikmacs--staff-y (car (last staff-list)))))
+                               (musikmacs--y-to-pixel -4))))))
+          addons)))
+(defun musikmacs--render-group (note-group stem-up selected)
+  (let ((notes-list (musikmacs--note-group-list note-group)))
     (unless (null notes-list)
-      (setq notes-x (if stem-up
-                      (+ notes-x x-off)
-                    (- notes-x x-off)))
-    (mapc (lambda (n)
-            (let ((y (musikmacs--note-y n))
-                  (state (musikmacs--note-state n)))
-                (let
-                ((reversing (if (and last-y (= y (+ last-y 1)))
-                                (progn
-                                  (setq last-y nil)
-                                  t)
-                              (progn
-                                (setq last-y y)
-                                nil)))
-                 (note-yp (musikmacs--y-to-pixel y))
-                 (ncolor (cond ((eq state 'selected) (face-attribute font-lock-doc-face :foreground))
-                               ((eq state 'active) (face-attribute font-lock-builtin-face :foreground))
-                               (t dcolor)))
-                 (text (musikmacs--note-text n)))
-                (if text
-                    (svg-text svg
-                              text
-                              :x notes-x
-                              :y note-yp
-                              :stroke ncolor
-                              :font )
-                    (svg--append
-                     svg
-                     (dom-node 'use
-                               `((xlink:href . ,(if (equal reversing stem-up)
-                                                    (format "#%s-body" time-value)
-                                                  (format "#%s-body-left" time-value)))
-                                 (x . ,notes-x)
-                                 (y . ,note-yp)
-                                 (fill . ,ncolor)))))
-              (when (and reversing (or (> y 5) (< y -5)))
-                (svg-line svg notes-x
-                          note-yp
-                          (if stem-up
-                              (+ notes-x (* dheight 2.63))
-                            (- notes-x (* dheight 2.63)))
-                          note-yp)))))
-          notes-list)
-    (let ((start-x (if stem-up
-                           (+ notes-x (* dheight 0.4))
-                         (- notes-x (* dheight 0.4))))
-              (end-x (if stem-up
-                           (- notes-x (* dheight 2.63))
-                       (+ notes-x (* dheight 2.63)))))
-      (when (> max-y 5)
-        (dotimes (i (/ (- max-y 4) 2))
-          (svg-line svg start-x
-                    (musikmacs--y-to-pixel (+ (* i 2) 6))
-                    end-x
-                    (musikmacs--y-to-pixel (+ (* i 2) 6)))))
-      (when (< min-y -5)
-        (dotimes (i (/ (- -4 min-y) 2))
-          (svg-line svg start-x
-                    (musikmacs--y-to-pixel (- -6 (* i 2)))
-                    end-x
-                    (musikmacs--y-to-pixel (- -6(* i 2)))))))
-    (when (not (eq time-value 'whole))
-      (progn
-      (if stem-up
-        (cond ((> max-y 0) (setq max-y (+ max-y 5)))
-              ((> max-y -7) (setq max-y (+ max-y 7)))
-              (t (setq max-y 0)))
-      (cond ((< min-y 0) (setq min-y (- min-y 5)))
-            ((< min-y 7) (setq min-y (- min-y 7)))
-            (t (setq min-y 0))))
-    (if stem-up
-        (setq min-y (+ min-y 0.2))
-      (if last-y
-          (setq max-y (- max-y 0.2))
-        (setq max-y (+ max-y 0.2))))
-    (svg-line svg
-               notes-x
-               (musikmacs--y-to-pixel max-y)
-               notes-x
-               (musikmacs--y-to-pixel min-y)))))))
-(insert-image (musikmacs--render-row `((,(record 'musikmacs--note-group
-                                                 10 nil 'whole (list (musikmacs--note -7 nil nil) (musikmacs--note -4 nil nil)))
-                                        ,(record 'musikmacs--note-group
-                                                 10 nil 'quarter (list (musikmacs--note 0 'active nil) (musikmacs--note 3 nil nil) (musikmacs--note 7 'active "x"))))
-                                       )
-                                     `(,(record 'staff 10 nil nil)) 20))
+      (let ((min-y (musikmacs--note-y (car (musikmacs--note-group-list note-group))))
+             (max-y (musikmacs--note-y (car (last (musikmacs--note-group-list note-group)))))
+             (min-stem-y)
+             (max-stem-y)
+             (last-y nil)
+             (x-off (* dheight 1.115))
+             (time-value (musikmacs--note-group-value note-group)))
+        (setq notes-x (if stem-up
+                                 (+ notes-x x-off)
+                               (- notes-x x-off)))
+       (mapc (lambda (n)
+               (unless (eq 'candidate (musikmacs--note-state n))
+                 (unless min-stem-y (setq min-stem-y (musikmacs--note-y n)))
+                 (setq max-stem-y (musikmacs--note-y n)))) notes-list)
+       (mapc (lambda (n)
+               (let ((y (musikmacs--note-y n))
+                     (state (musikmacs--note-state n)))
+                 (let
+                     ((reversing (if (and last-y (= y (+ last-y 1)))
+                                     (progn
+                                       (setq last-y nil)
+                                       t)
+                                   (progn
+                                     (setq last-y y)
+                                     nil)))
+                      (note-yp (musikmacs--y-to-pixel y))
+                      (ncolor (cond ((and selected (eq state 'selected)) (face-attribute font-lock-doc-face :foreground))
+                                    ((or
+                                      (eq state 'active)
+                                      (eq state 'candidate)) (face-attribute font-lock-builtin-face :foreground))
+                                    (t dcolor)))
+                      (text (musikmacs--note-text n)))
+                   (if (eq state 'candidate)
+                       (svg-text svg
+                                 text
+                                 :x notes-x
+                                 :y (+ note-yp dheight)
+                                 :fill ncolor
+                                 :font-family (face-attribute 'default :family)
+                                 :text-anchor (if (equal reversing stem-up)
+                                                  "start"
+                                                "end")
+                                 :stroke "none"
+                                 :font-size (* dheight 4.0))
+                     (svg--append
+                      svg
+                      (dom-node 'use
+                                `((xlink:href . ,(if (equal reversing stem-up)
+                                                     (format "#%s-body" time-value)
+                                                   (format "#%s-body-left" time-value)))
+                                  (x . ,notes-x)
+                                  (y . ,note-yp)
+                                  (fill . ,ncolor)))))
+                   (when (and reversing (or (> y 5) (< y -5)))
+                     (svg-line svg notes-x
+                               note-yp
+                               (if stem-up
+                                   (+ notes-x (* dheight 2.63))
+                                 (- notes-x (* dheight 2.63)))
+                               note-yp)))))
+             notes-list)
+       (let ((start-x (if stem-up
+                          (+ notes-x (* dheight 0.4))
+                        (- notes-x (* dheight 0.4))))
+             (end-x (if stem-up
+                        (- notes-x (* dheight 2.63))
+                      (+ notes-x (* dheight 2.63)))))
+         (when (> max-y 5)
+           (dotimes (i (/ (- max-y 4) 2))
+             (svg-line svg start-x
+                       (musikmacs--y-to-pixel (+ (* i 2) 6))
+                       end-x
+                       (musikmacs--y-to-pixel (+ (* i 2) 6)))))
+         (when (< min-y -5)
+           (dotimes (i (/ (- -4 min-y) 2))
+             (svg-line svg start-x
+                       (musikmacs--y-to-pixel (- -6 (* i 2)))
+                       end-x
+                       (musikmacs--y-to-pixel (- -6(* i 2)))))))
+       (when (not (eq time-value 'whole))
+         (progn
+           (if stem-up
+               (cond ((> max-stem-y 0) (setq max-stem-y (+ max-stem-y 5)))
+                     ((> max-stem-y -7) (setq max-stem-y (+ max-stem-y 7)))
+                     (t (setq max-stem-y 0)))
+             (cond ((< min-stem-y 0) (setq min-stem-y (- min-stem-y 5)))
+                   ((< min-stem-y 7) (setq min-stem-y (- min-stem-y 7)))
+                   (t (setq min-stem-y 0))))
+           (if stem-up
+               (setq min-stem-y (+ min-stem-y 0.2))
+             (if last-y
+                 (setq max-stem-y (- max-stem-y 0.2))
+               (setq max-stem-y (+ max-stem-y 0.2))))
+           (svg-line svg
+                     notes-x
+                     (musikmacs--y-to-pixel max-stem-y)
+                     notes-x
+                     (musikmacs--y-to-pixel min-stem-y))))))))
+(defun musikmacs--note-group-insert-candidate (note-group y text)
+  (musikmacs--note-group-list-set note-group
+                                  (cons (musikmacs--note y 'candidate text)
+                                        (musikmacs--note-group-list note-group))))
+(defun musikmacs--note-group-select-candidate (note-group text)
+  (mapcar (lambda (note)
+            (if (equal text (musikmacs--note-text note))
+                (musikmacs--note-state-set note 'active)
+              (when (eq 'active (musikmacs--note-state note))
+                (musikmacs--note-state-set 'candidate)))) (musikmacs--note-group-list note-group)))
+(defun musikmacs--note-group-enter-candidate (note-group)
+  (let ((note-list (musikmacs--note-group-list-set note-group
+                    (cons nil (musikmacs--note-group-list note-group)))))
+    (while (cdr note-list)
+      (let* ((note (cadr note-list))
+             (note-state (musikmacs--note-state note)))
+        (cond ((eq note-state 'active) (musikmacs--note-state-set note 'selected))
+              ((eq note-state 'selected) (musikmacs--note-state-set note nil))
+              ((eq note-state 'candidate) (setcdr note-list (cddr note-list))))
+        (setq note-list (cdr note-list))))
+    (musikmacs--note-group-list-set note-group (cdr (musikmacs--note-group-list note-group)))))
+
+(defun musikmacs--eat-ret ()
+  (while (and (char-after) (char-equal ?\n (char-after)))
+    (delete-char 1)))
+(defun musikmacs--note-group-units (ng)
+  (let ((time-value (musikmacs--note-group-value ng)))
+    (cond ((eq 'whole time-value) 3.0)
+          ((eq 'half time-value) 2.0)
+          ((eq 'quarter time-value) 1.5)
+          ((eq 'eighth time-value) 1.0))))
+(defun musikmacs-refresh-at-point ()
+  "Rerender SVG scores after current-point of current-buffer if needed."
+  (let ((selected-pos) (point))
+    (save-excursion
+            (beginning-of-line)
+            (put-text-property (point) (+ (point) 1)
+                               :musikmacs--line-start nil)
+            (let* ((line-start-point (point))
+                   (wwidth (window-body-width nil t))
+                   (dheight (/ (face-attribute 'default :height) 20.0))
+                   (preferred-units-per-line (/ wwidth (* dheight 4.0)))
+                   (maximal-unit-width (* dheight 4.0)))
+              (while (and (not (equal (point) (point-max))) ;; EOF
+                          (not (get-text-property (point) :musikmacs--line-start)))
+                (put-text-property (point) (+ (point) 1)
+                                   :musikmacs--line-start t)
+                (let ((used-units 0)
+                      (current-col-data (get-text-property (point) :musikmacs--col)))
+                  (while (not (or
+                               (equal (point) (point-max)) ;; EOF
+                               (and
+                                (> used-units preferred-units-per-line)
+                                (member 'barline (musikmacs--col-addons current-col-data))) ;; row filled
+                               ))
+                    (musikmacs--col-x-set current-col-data used-units)
+                    (setq used-units (+ used-units
+                                        (apply 'min (mapcar
+                                                     (lambda (cell)
+                                                       (min (musikmacs--note-group-units (musikmacs--staff-cell-note-group-up cell))
+                                                            (musikmacs--note-group-units (musikmacs--staff-cell-note-group-down cell))))
+                                                     (musikmacs--col-staff-cells current-col-data)))))
+                    (forward-char)
+                    (musikmacs--eat-ret)
+                    (unless (equal (point) (point-max))
+                      (setq current-col-data (get-text-property (point) :musikmacs--col))))
+                  (setq used-units (- used-units 1.0)) ;; exclude the final bar line
+                  (put-text-property line-start-point
+                                     (point)
+                                     'display
+                                     (musikmacs--render-row (current-buffer)
+                                                            line-start-point
+                                                            (point)
+                                                            (min maximal-unit-width
+                                                                 (/ wwidth used-units))
+                                                            selected-pos
+                                                            20))
+                  (insert-char ?\n)
+                  ))))))
+
+(defvar musikmacs-mode-map nil "keymap for `musikmacs-mode'")
+(setq musikmacs-mode-map (let ((map (make-sparse-keymap)))
+                             (suppress-keymap map)
+                             map))
+(define-derived-mode musikmacs-mode text-mode "musiKmacs"
+  (delete-region (point-min) (point-max))
+  (insert x)
+  (musikmacs-refresh-at-point))
+
+
+(setq test-group (record 'musikmacs--note-group
+                         nil 'whole (list (musikmacs--note -7 'candidate "x")
+                                             (musikmacs--note -5 'candidate "y")
+                                             (musikmacs--note -4 nil nil))))
+(musikmacs--note-group-insert-candidate test-group -10 "z")
+(musikmacs--note-group-select-candidate test-group "x")
+(musikmacs--note-group-enter-candidate test-group)
+(setq x "123")
+(put-text-property 0 1 :musikmacs--col (musikmacs--col 10 (list (musikmacs--staff-cell test-group (record 'musikmacs--note-group
+                                                                                                      nil 'quarter (list (musikmacs--note 1 'selected nil) (musikmacs--note 3 nil nil) (musikmacs--note 4 'candidate "h"))) nil)) nil) x)
+(put-text-property 1 2 :musikmacs--col (musikmacs--col 20 (list (musikmacs--staff-cell test-group (record 'musikmacs--note-group
+                                                                                    nil 'quarter (list (musikmacs--note 1 'selected nil
+                                                                                                                        ) (musikmacs--note 3 nil nil) (musikmacs--note 4 nil "x"))) nil)) nil) x)
+(put-text-property 2 3 :musikmacs--col (musikmacs--col 30 (list (musikmacs--staff-cell (musikmacs--note-group nil 'whole nil)(musikmacs--note-group nil 'whole nil) nil)) '(barline)) x)
+
+(put-text-property 0 3 :musikmacs--staves (list (record 'staff 10 nil nil)) x)
+(insert-image (musikmacs--render-row x 0 3 0 20))
