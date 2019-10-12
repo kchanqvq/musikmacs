@@ -20,12 +20,28 @@
                        (defun ,(intern (concat prefix (symbol-name fieldname) "-set"))
                              (rec val)
                          (aset rec ,field-no val)))) fieldlist)))))
-(musikmacs--def-record staff (y clef key))
+(musikmacs--def-record staff (y clef clef-y key))
 (musikmacs--def-record note-group (dot value list))
 (musikmacs--def-record note (y state text))
 (musikmacs--def-record col (x staff-cells addons))
 (musikmacs--def-record staff-cell (note-group-up note-group-down addons))
 
+(setq musikmacs-candidate-keys '("u" "v" "w" "x" "y" "z"))
+(defun musikmacs--key-to-int (key)
+  (- (aref key 0) 97))
+(defun musikmacs--candidate-ylist-for-key (key-pressed staff)
+  (let* ((offset (- (musikmacs--key-to-int key-pressed)
+                    (- (let ((clef (musikmacs--staff-clef staff)))
+                         (cond ((eq 'g clef) 6)
+                               ((eq 'c clef) 2)
+                               ((eq 'f clef) 5))) (musikmacs--staff-clef-y staff))))
+         (low (/ (- -10 offset) 7))
+         (high (/ (- 10 offset) 7))
+         (result))
+    (dotimes (i (- (+ 1 high) low))
+      (setq result (cons (+ offset (* i 7)) result)))
+    result))
+(musikmacs--candidate-ylist-for-key "a" (record 'staff 10 'g -2 nil))
 (defun musikmacs--render-row (object
                               start
                               end
@@ -96,10 +112,11 @@
                         (svg-line svg 0 y
                                   wwidth y)))))
           (dotimes (i (- end start))
-            (musikmacs--render-col
-             (get-text-property (+ start i) :musikmacs--col object)
-             (get-text-property (+ start i) :musikmacs--staves object)
-             (equal i cursor-pos)))
+            (let ((i-pos (+ start i)))
+              (musikmacs--render-col
+                     (get-text-property i-pos :musikmacs--col object)
+                     (get-text-property i-pos :musikmacs--staves object)
+                     (equal i-pos cursor-pos))))
           (svg-image svg))))
 (defun musikmacs--render-col (col-data
                               staff-list
@@ -225,27 +242,91 @@
                      (musikmacs--y-to-pixel max-stem-y)
                      notes-x
                      (musikmacs--y-to-pixel min-stem-y))))))))
-(defun musikmacs--note-group-insert-candidate (note-group y text)
-  (musikmacs--note-group-list-set note-group
-                                  (cons (musikmacs--note y 'candidate text)
-                                        (musikmacs--note-group-list note-group))))
+(defun musikmacs--note-group-insert-candidates (note-group ylist text-list)
+  "Insert list of candidates (YLIST) into NOTE-GROUP.
+YLIST has to be non-nil.
+TEXT-LIST has to be longer than YLIST.
+Texts displayed as placeholders for candidates are taken from TEXT-LIST.
+YLIST has to be in ascending order.
+Ys that already has a note is ignored.
+The Y that is closest to any selected note is marked as active."
+  (let* ((note-list (cons nil (musikmacs--note-group-list note-group)))
+         (current-cell note-list)
+         (best-candidate (car text-list))
+         (best-distance nil))
+    (while ylist
+      (let ((insert-y (car ylist))
+            (old-y (when (cadr current-cell)
+                     (musikmacs--note-y (cadr current-cell)))))
+        (cond ((or (not old-y) ;; Higher than any existing note
+                   (< insert-y old-y))
+               (progn
+                 (let* ((up-distance
+                        (when (and old-y (eq 'selected (musikmacs--note-state (cadr current-cell))))
+                          (- old-y insert-y)))
+                       (down-distance
+                        (when (and (car current-cell) (eq 'selected (musikmacs--note-state (car current-cell))))
+                          (- insert-y (musikmacs--note-y (car current-cell)))))
+                       (current-distance (if up-distance
+                                             (if down-distance
+                                                 (min up-distance down-distance)
+                                               up-distance)
+                                           down-distance)))
+                   (when (or (not best-distance) (and current-distance (< current-distance best-distance)))
+                     (setq best-distance current-distance)
+                     (setq best-candidate (car text-list))))
+                 (setcdr current-cell (cons (musikmacs--note insert-y 'candidate (car text-list)) (cdr current-cell)))
+                 (setq text-list (cdr text-list))
+                 (setq ylist (cdr ylist))
+                 (setq current-cell (cdr current-cell))))
+              ((= insert-y old-y)
+               (setq ylist (cdr ylist)))
+              ((> insert-y old-y)
+               (setq current-cell (cdr current-cell))))))
+    (musikmacs--note-group-list-set note-group (cdr note-list))
+    (musikmacs--note-group-select-candidate note-group best-candidate)))
+
 (defun musikmacs--note-group-select-candidate (note-group text)
   (mapcar (lambda (note)
             (if (equal text (musikmacs--note-text note))
                 (musikmacs--note-state-set note 'active)
               (when (eq 'active (musikmacs--note-state note))
                 (musikmacs--note-state-set 'candidate)))) (musikmacs--note-group-list note-group)))
+(defun musikmacs--note-group-has-candidate (note-group)
+  (some (lambda (x) x)
+         (mapcar (lambda (note)
+                   (let ((state (musikmacs--note-state note)))
+                     (or (eq 'candidate state)
+                         (eq 'active state))))
+                 (musikmacs--note-group-list note-group))))
 (defun musikmacs--note-group-enter-candidate (note-group)
-  (let ((note-list (musikmacs--note-group-list-set note-group
-                    (cons nil (musikmacs--note-group-list note-group)))))
-    (while (cdr note-list)
-      (let* ((note (cadr note-list))
-             (note-state (musikmacs--note-state note)))
-        (cond ((eq note-state 'active) (musikmacs--note-state-set note 'selected))
-              ((eq note-state 'selected) (musikmacs--note-state-set note nil))
-              ((eq note-state 'candidate) (setcdr note-list (cddr note-list))))
-        (setq note-list (cdr note-list))))
-    (musikmacs--note-group-list-set note-group (cdr (musikmacs--note-group-list note-group)))))
+  "Enter note candidate for a note-group object.
+Return t if some candidate is entered.
+Return nil if no candidate in this object."
+  (if (musikmacs--note-group-has-candidate note-group)
+      (let ((note-list (musikmacs--note-group-list-set note-group
+                                                          (cons nil (musikmacs--note-group-list note-group)))))
+           (while (cdr note-list)
+             (let* ((note (cadr note-list))
+                    (note-state (musikmacs--note-state note)))
+               (cond ((eq note-state 'active) (musikmacs--note-state-set note 'selected))
+                     ((eq note-state 'selected) (musikmacs--note-state-set note nil))
+                     ((eq note-state 'candidate) (setcdr note-list (cddr note-list))))
+               (setq note-list (cdr note-list))))
+           (musikmacs--note-group-list-set note-group (cdr (musikmacs--note-group-list note-group)))
+           t)
+    nil))
+(defun musikmacs-enter-candidate ()
+  "Enter note candidate at current point.
+Call this every time after moving out of a point.
+Return t if some candidate is entered.
+Return nil if no candidate at point."
+  (let ((current-col (get-text-property (point) :musikmacs--col)))
+    (some (lambda (x) x)
+     (mapcar (lambda (cell)
+               (or (musikmacs--note-group-enter-candidate (musikmacs--staff-cell-note-group-up cell))
+                (musikmacs--note-group-enter-candidate (musikmacs--staff-cell-note-group-down cell))))
+             (musikmacs--col-staff-cells current-col)))))
 
 (defun musikmacs--eat-ret ()
   (while (and (char-after) (char-equal ?\n (char-after)))
@@ -258,7 +339,7 @@
           ((eq 'eighth time-value) 1.0))))
 (defun musikmacs-refresh-at-point ()
   "Rerender SVG scores after current-point of current-buffer if needed."
-  (let ((selected-pos) (point))
+  (let ((selected-pos (point)))
     (save-excursion
             (beginning-of-line)
             (put-text-property (point) (+ (point) 1)
@@ -304,31 +385,73 @@
                                                             20))
                   (insert-char ?\n)
                   ))))))
-
+(defun musikmacs-skip (func)
+  "Skip newline and barlines"
+  (while (and (char-after)
+              (or (char-equal ?\n (char-after))
+                  (member 'barline (musikmacs--col-addons (get-text-property (point) :musikmacs--col)))))
+    (funcall func)))
+(defun musikmacs-forward ()
+  "Move forward a note in musiKmacs mode."
+  (interactive)
+  (setq disable-point-adjustment t)
+  (musikmacs-enter-candidate)
+  (forward-char)
+  (musikmacs-skip 'forward-char)
+  (musikmacs-refresh-at-point))
+(defun musikmacs-backward ()
+  "Move forward a note in musiKmacs mode."
+  (interactive)
+  (print this-command)
+  (setq disable-point-adjustment t)
+  (musikmacs-enter-candidate)
+  (backward-char)
+  (musikmacs-skip 'backward-char)
+  (musikmacs-refresh-at-point))
+(defun musikmacs-ret ()
+  "Enter candidate if there is some.
+Otherwise move forward."
+  (interactive)
+  (if (musikmacs-enter-candidate)
+      (musikmacs-refresh-at-point)
+    (musikmacs-forward)))
+(defun musikmacs-cycle-voice ()
+  "Change voice current which selected note belongs to."
+  (interactive))
+(defun musikmacs-propose-candidates ()
+  "Add candidates at current point based on a key pressed."
+  (interactive))
 (defvar musikmacs-mode-map nil "keymap for `musikmacs-mode'")
 (setq musikmacs-mode-map (let ((map (make-sparse-keymap)))
-                             (suppress-keymap map)
-                             map))
+                           (suppress-keymap map)
+                           (define-key map "\C-f" 'musikmacs-forward)
+                           (define-key map (kbd "<right>") 'musikmacs-forward)
+                           (define-key map "\C-b" 'musikmacs-backward)
+                           (define-key map (kbd "<left>") 'musikmacs-backward)
+                           (define-key map (kbd "<return>") 'musikmacs-ret)
+                           map))
 (define-derived-mode musikmacs-mode text-mode "musiKmacs"
   (delete-region (point-min) (point-max))
   (insert x)
   (musikmacs-refresh-at-point))
 
-
 (setq test-group (record 'musikmacs--note-group
-                         nil 'whole (list (musikmacs--note -7 'candidate "x")
-                                             (musikmacs--note -5 'candidate "y")
+                         nil 'whole (list (musikmacs--note -7 'selected nil)
+                                             (musikmacs--note -5 'selected nil)
                                              (musikmacs--note -4 nil nil))))
 (musikmacs--note-group-insert-candidate test-group -10 "z")
 (musikmacs--note-group-select-candidate test-group "x")
 (musikmacs--note-group-enter-candidate test-group)
-(setq x "123")
+(setq x "1234")
 (put-text-property 0 1 :musikmacs--col (musikmacs--col 10 (list (musikmacs--staff-cell test-group (record 'musikmacs--note-group
                                                                                                       nil 'quarter (list (musikmacs--note 1 'selected nil) (musikmacs--note 3 nil nil) (musikmacs--note 4 'candidate "h"))) nil)) nil) x)
 (put-text-property 1 2 :musikmacs--col (musikmacs--col 20 (list (musikmacs--staff-cell test-group (record 'musikmacs--note-group
-                                                                                    nil 'quarter (list (musikmacs--note 1 'selected nil
+                                                                                    nil 'quarter (list (musikmacs--note 1 nil nil
                                                                                                                         ) (musikmacs--note 3 nil nil) (musikmacs--note 4 nil "x"))) nil)) nil) x)
-(put-text-property 2 3 :musikmacs--col (musikmacs--col 30 (list (musikmacs--staff-cell (musikmacs--note-group nil 'whole nil)(musikmacs--note-group nil 'whole nil) nil)) '(barline)) x)
+(put-text-property 2 3 :musikmacs--col (musikmacs--col 30 (list (musikmacs--staff-cell (musikmacs--note-group nil 'whole nil)(musikmacs--note-group nil 'eighth nil) nil)) '(barline)) x)
+(put-text-property 3 4 :musikmacs--col (musikmacs--col 20 (list (musikmacs--staff-cell test-group (record 'musikmacs--note-group
+                                                                                                          nil 'quarter (list (musikmacs--note 1 nil nil
+                                                                                                                                              ) (musikmacs--note 3 nil nil) (musikmacs--note 4 nil "x"))) nil)) nil) x)
 
-(put-text-property 0 3 :musikmacs--staves (list (record 'staff 10 nil nil)) x)
+(put-text-property 0 4 :musikmacs--staves (list (record 'staff 10 nil nil nil)) x)
 (insert-image (musikmacs--render-row x 0 3 0 20))
